@@ -53,7 +53,7 @@ function createGame(cv, ui) {
   let az = 0, el = 1.0, zoom = 1, raf = 0, disposed = false;
 
   const setCam = () => {
-    const d = (21 / Math.min(1, cam.aspect * 1.15)) * zoom;
+    const d = Math.max(21, 9.8 / (0.364 * cam.aspect)) * zoom;
     cam.position.set(d * Math.cos(el) * Math.sin(az), d * Math.sin(el), d * Math.cos(el) * Math.cos(az));
     cam.lookAt(0, 0, 0);
   };
@@ -317,8 +317,25 @@ function createGame(cv, ui) {
   // ---------- input ----------
   const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
   let drag = null;
-  const onDown = (e) => { drag = { x: e.clientX, y: e.clientY, m: 0 }; cv.setPointerCapture(e.pointerId); };
+  const pts = new Map();
+  let pd = 0;
+  const pdist = () => { const v = [...pts.values()]; return Math.hypot(v[0][0] - v[1][0], v[0][1] - v[1][1]) || 1; };
+  const onDown = (e) => {
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    drag = { x: e.clientX, y: e.clientY, m: 0 };
+    if (pts.size > 1) { drag.m = 99; pd = pdist(); }
+    cv.setPointerCapture(e.pointerId);
+  };
+  const onCancel = (e) => { pts.delete(e.pointerId); pd = 0; drag = null; };
   const onMove = (e) => {
+    if (pts.has(e.pointerId)) pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size > 1) { // pinch to zoom
+      const d = pdist();
+      if (pd) { zoom = Math.max(0.55, Math.min(1.6, (zoom * pd) / d)); setCam(); }
+      pd = d;
+      if (drag) drag.m = 99;
+      return;
+    }
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     drag.m += Math.abs(dx) + Math.abs(dy);
@@ -328,19 +345,28 @@ function createGame(cv, ui) {
     setCam();
   };
   const onUp = (e) => {
+    pts.delete(e.pointerId); pd = 0;
     const d = drag; drag = null;
     if (!d || d.m > 6) return;
     ptr.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
     ray.setFromCamera(ptr, cam);
     if (phase === "pick") {
-      const h = ray.intersectObjects(tokMeshes).find((x) => x.object.userData.tok.p === cur);
-      if (h) { const t = h.object.userData.tok; if (t.mk.visible) play(t.i); }
+      // pick the nearest highlighted token to the tap (finger-friendly)
+      let bt = null, bd = 48;
+      for (const t of T[cur]) {
+        if (!t.mk.visible) continue;
+        const v = t.g.position.clone().project(cam);
+        const d = Math.hypot(((v.x + 1) / 2) * window.innerWidth - e.clientX, ((1 - v.y) / 2) * window.innerHeight - e.clientY);
+        if (d < bd) { bd = d; bt = t; }
+      }
+      if (bt) play(bt.i);
     } else if (phase === "roll" && mode[cur] === 0 && ray.intersectObject(dice).length) roll();
   };
   const onWheel = (e) => { zoom = Math.max(0.55, Math.min(1.6, zoom * (1 + e.deltaY * 0.001))); setCam(); e.preventDefault(); };
   cv.addEventListener("pointerdown", onDown);
   cv.addEventListener("pointermove", onMove);
   cv.addEventListener("pointerup", onUp);
+  cv.addEventListener("pointercancel", onCancel);
   cv.addEventListener("wheel", onWheel, { passive: false });
 
   // ---------- render loop ----------
@@ -375,6 +401,7 @@ function createGame(cv, ui) {
       cv.removeEventListener("pointerdown", onDown);
       cv.removeEventListener("pointermove", onMove);
       cv.removeEventListener("pointerup", onUp);
+      cv.removeEventListener("pointercancel", onCancel);
       cv.removeEventListener("wheel", onWheel);
       rd.dispose();
     },
@@ -398,6 +425,15 @@ export default function Ludo3D() {
   const [modes, setModes] = useState([0, 1, 1, 1]);
   const [hud, setHud] = useState({ p: 0, text: "", can: false });
   const [winner, setWinner] = useState(0);
+  const [narrow, setNarrow] = useState(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-aspect-ratio: 1/1), (max-width: 640px)");
+    const f = () => setNarrow(mq.matches);
+    f();
+    mq.addEventListener("change", f);
+    return () => mq.removeEventListener("change", f);
+  }, []);
 
   useEffect(() => {
     game.current = createGame(cvRef.current, {
@@ -415,13 +451,13 @@ export default function Ludo3D() {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "#efe7d6" }}>
-      <canvas ref={cvRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none" }} />
+      <canvas ref={cvRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", userSelect: "none", WebkitTapHighlightColor: "transparent" }} />
 
       {screen !== "setup" && (
-        <div style={S.hud}>
+        <div style={narrow ? { ...S.hud, top: "auto", bottom: 12, width: "calc(100vw - 24px)", boxSizing: "border-box", justifyContent: "space-between", padding: 12 } : S.hud}>
           <div style={{ width: 20, height: 20, borderRadius: "50%", background: hex(COL[hud.p]), border: "2px solid #2b2620" }} />
           <div style={{ fontSize: 14, minWidth: 150 }}>{hud.text}</div>
-          <button style={{ ...S.btn, opacity: hud.can ? 1 : 0.35 }} disabled={!hud.can} onClick={() => game.current.roll()}>Roll 🎲</button>
+          <button style={{ ...S.btn, opacity: hud.can ? 1 : 0.35, ...(narrow ? { padding: "12px 18px", fontSize: 16 } : {}) }} disabled={!hud.can} onClick={() => game.current.roll()}>Roll 🎲</button>
         </div>
       )}
 
